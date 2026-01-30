@@ -63,6 +63,8 @@ from .const import (
     DEFAULT_SENSOR_ENVIRONMENT,
     CONF_SENSOR_NETWATCH_TRACKER,
     DEFAULT_SENSOR_NETWATCH_TRACKER,
+    PING_MIN_INTERVAL,
+    PING_MIN_CACHE,
 )
 from .apiparser import parse_api
 from .mikrotikapi import MikrotikAPI
@@ -119,7 +121,7 @@ class MikrotikTrackerCoordinator(DataUpdateCoordinator[None]):
             self.hass,
             _LOGGER,
             name=DOMAIN,
-            update_interval=timedelta(seconds=10),
+            update_interval=timedelta(seconds=PING_MIN_INTERVAL),
         )
         self.name = config_entry.data[CONF_NAME]
         self.host = config_entry.data[CONF_HOST]
@@ -183,17 +185,33 @@ class MikrotikTrackerCoordinator(DataUpdateCoordinator[None]):
                 ):
                     tmp_interface = self.coordinator.ds["arp"][uid]["bridge"]
 
-                _LOGGER.debug(
-                    "Ping host: %s", self.coordinator.ds["host"][uid]["address"]
-                )
+                # before to invocate arp_ping check last ping
+                now_ts = utcnow().timestamp()
+                last_ts = self.coordinator.ds["host"][uid].get("last_ping_ts", 0)
 
-                self.coordinator.ds["host"][uid]["available"] = (
-                    await self.hass.async_add_executor_job(
-                        self.api.arp_ping,
-                        self.coordinator.ds["host"][uid]["address"],
-                        tmp_interface,
+                should_ping = (now_ts - last_ts) >= PING_MIN_CACHE
+
+                if should_ping:
+                    _LOGGER.debug(
+                        "Ping host: %s", self.coordinator.ds["host"][uid]["address"]
                     )
-                )
+
+                    self.coordinator.ds["host"][uid]["available"] = (
+                        await self.hass.async_add_executor_job(
+                            self.api.arp_ping,
+                            self.coordinator.ds["host"][uid]["address"],
+                            tmp_interface,
+                        )
+                    )
+                    # save timestamp y (optional) last result
+                    self.coordinator.ds["host"][uid]["last_ping_ts"] = now_ts
+                    self.coordinator.ds["host"][uid]["last_ping_result"] = self.coordinator.ds["host"][uid]["available"]
+                else:
+                    _LOGGER.debug(
+                        "Ping host cache: %s", self.coordinator.ds["host"][uid]["address"]
+                    )
+                    # reused the last result to "enable" device
+                    self.coordinator.ds["host"][uid]["available"] = self.coordinator.ds["host"][uid].get("last_ping_result", False)
 
             # Update last seen
             if self.coordinator.ds["host"][uid]["available"]:
